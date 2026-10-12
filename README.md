@@ -11,7 +11,7 @@ This repository contains the research paper and source code for a project invest
 
 The paper explores the integration of variational quantum circuits (VQCs) with a modified Light Gated Recurrent Unit (LiGRU) architecture for financial time-series forecasting.
 
-[Read the Research Paper](paper.pdf)
+[Read the Research Paper](Manuscript.pdf)
 
 ## Repository Contents
 
