@@ -1,17 +1,18 @@
-"""Evaluation + plotting helpers shared by every experiment.
+"""Plots and result-file output shared by every experiment.
 
-Every experiment cell in the notebook re-defined the same matplotlib style,
-the same "loss curve" figure, and the same "true vs predicted with crisis
-shading" figure, changing only titles/filenames. Consolidated here.
+Consolidated from common/plotting.py and common/Post_Training_Plotting.py.
+(The bootstrap-CI helpers that used to sit in the middle of plotting.py now live
+in analysis.py, and ``evaluate_full_timeline`` lives in src.py.)
+
+Every experiment used to re-define the same matplotlib style, the same "loss
+curve" figure, and the same "true vs predicted with crisis shading" figure,
+changing only titles/filenames.
 """
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import torch
-import math
-from common.data import CRISIS_NAMES, CRISIS_SEGMENTS
-from common.losses import asymmetric_mse_loss
+
 
 MPL_STYLE = {
     "font.size": 16,
@@ -50,95 +51,6 @@ def plot_loss_curve(train_losses, val_losses, title: str, save_path: str):
     plt.show()
 
 
-def evaluate_full_timeline(model, data: dict, hidden_dim: int, num_layers: int):
-    """Run the (already-trained) model over train/val/test and inverse-transform
-    predictions back to the original log(r^2) scale.
-    """
-    X_train, y_train = data["X_train"], data["y_train"]
-    X_val, y_val = data["X_val"], data["y_val"]
-    X_test, y_test = data["X_test"], data["y_test"]
-    scaler_target = data["scaler_target"]
-
-    model.eval()
-    with torch.no_grad():
-        h_train = [torch.zeros(X_train.size(0), hidden_dim) for _ in range(num_layers)]
-        train_pred = model(X_train, h_train)[0][:, -1, :].numpy()
-
-        h_val = [torch.zeros(X_val.size(0), hidden_dim) for _ in range(num_layers)]
-        val_pred = model(X_val, h_val)[0][:, -1, :].numpy()
-
-        h_test = [torch.zeros(X_test.size(0), hidden_dim) for _ in range(num_layers)]
-        test_pred = model(X_test, h_test)[0][:, -1, :].numpy()
-
-    train_pred_inv = scaler_target.inverse_transform(train_pred)
-    val_pred_inv = scaler_target.inverse_transform(val_pred)
-    test_pred_inv = scaler_target.inverse_transform(test_pred)
-
-    y_train_inv = scaler_target.inverse_transform(y_train.numpy())
-    y_val_inv = scaler_target.inverse_transform(y_val.numpy())
-    y_test_inv = scaler_target.inverse_transform(y_test.numpy())
-
-    all_true = np.concatenate([y_train_inv, y_val_inv, y_test_inv], axis=0).flatten()
-    all_pred = np.concatenate([train_pred_inv, val_pred_inv, test_pred_inv], axis=0).flatten()
-
-    train_end = len(y_train_inv)
-    val_end = train_end + len(y_val_inv)
-
-    all_dates = np.concatenate([data["train_dates"], data["val_dates"], data["test_dates"]])
-
-    test_loss_value = asymmetric_mse_loss(torch.tensor(test_pred), y_test).item()
-
-    return {
-    "all_true": all_true,
-    "all_pred": all_pred,
-    "all_dates": all_dates,
-    "train_end": train_end,
-    "val_end": val_end,
-    "test_loss_value": test_loss_value,
-    "y_test": y_test.numpy(),
-    "test_pred": test_pred
-    }
-
-from common.losses import asymmetric_mse_loss
-import torch
-
-def sqrt_asymmetric_mse(y_true, y_pred):
-    yt = torch.tensor(y_true, dtype=torch.float32)
-    yp = torch.tensor(y_pred, dtype=torch.float32)
-    return math.sqrt(asymmetric_mse_loss(yp, yt).item())
-
-def block_bootstrap_ci(y_true, y_pred, loss_fn=None, block_length=20, n_boot=2000, ci=0.95, seed=0):
-    """Time-series-aware block bootstrap CI for a scalar error metric computed
-    over paired (y_true, y_pred) sequences. Resamples contiguous blocks of
-    length `block_length` (with replacement) to preserve autocorrelation,
-    instead of resampling individual time points independently.
-    """
-    rng = np.random.default_rng(seed)
-    y_true = np.asarray(y_true).flatten()
-    y_pred = np.asarray(y_pred).flatten()
-    n = len(y_true)
-    n_blocks = int(np.ceil(n / block_length))
-
-    if loss_fn is None:
-        def loss_fn(yt, yp):
-            return np.sqrt(np.mean((yt - yp) ** 2))
-
-    boot_stats = np.empty(n_boot)
-    for b in range(n_boot):
-        start_idxs = rng.integers(0, n - block_length + 1, size=n_blocks)
-        idx = np.concatenate([np.arange(s, s + block_length) for s in start_idxs])[:n]
-        boot_stats[b] = loss_fn(y_true[idx], y_pred[idx])
-
-    point_estimate = loss_fn(y_true, y_pred)
-    alpha = 1 - ci
-    lo, hi = np.percentile(boot_stats, [100 * alpha / 2, 100 * (1 - alpha / 2)])
-
-    return {
-        "point_estimate": point_estimate,
-        "ci_low": lo,
-        "ci_high": hi,
-        "boot_stats": boot_stats,
-    }
 def plot_prediction_fit(eval_result: dict, title: str, save_path: str):
     apply_style()
     all_true = eval_result["all_true"]
@@ -249,3 +161,64 @@ def save_predictions_csv(all_eval_results: list, train_result: dict, out_prefix:
     }).to_csv(f"{out_prefix}_Predictions_test_losses.csv", index=False)
 
 
+# ===========================================================================
+# Re-plot from a saved predictions CSV  (was common/Post_Training_Plotting.py)
+# ===========================================================================
+# No training happens here: build_dataset() is only called to recover the dates,
+# then a saved *_Predictions*.csv is re-plotted with plot_prediction_fit().
+
+
+def replot_from_csv(
+    predictions_csv: str = "Quantum_LiGRU_Predictions_event2.csv",
+    seed: int = 0,
+    title: str = "Modified LiGRU - True vs Predicted First Difference of the Logarithm of the Squared Daily Returns",
+    save_path: str = "Classical_LiGRU_seed0_prediction_fit.png",
+):
+    from data import build_dataset  # imported lazily: pulls in torch, sklearn, EGARCH
+
+    # --- Recreate dataset metadata (only needed to recover the dates) ---
+    data = build_dataset(
+        seq_length=20,
+        use_egarch_vol=True,
+        print_egarch_summary=False
+    )
+
+    # --- Load saved predictions (one seed) ---
+    df = pd.read_csv(predictions_csv)
+    df = df[df["seed"] == seed].reset_index(drop=True)
+
+    # --- Get split boundaries ---
+    train_end = (df["split"] == "train").sum()
+    val_end = train_end + (df["split"] == "val").sum()
+
+    # --- Get predictions ---
+    all_true = df["true_vol_proxy"].to_numpy()
+    all_pred = df["predicted_vol"].to_numpy()
+
+    # --- Get the actual dates ---
+    all_dates = np.concatenate([
+        data["train_dates"],
+        data["val_dates"],
+        data["test_dates"]
+    ])
+
+    # Check that everything lines up
+    assert len(all_dates) == len(all_true), (
+        f"Dates: {len(all_dates)}, Predictions: {len(all_true)}"
+    )
+
+    # --- Reconstruct eval_result ---
+    eval_result = {
+        "all_true": all_true,
+        "all_pred": all_pred,
+        "train_end": train_end,
+        "val_end": val_end,
+        "all_dates": all_dates,
+    }
+
+    # --- Plot using the existing function ---
+    plot_prediction_fit(eval_result, title=title, save_path=save_path)
+
+
+if __name__ == "__main__":
+    replot_from_csv()
